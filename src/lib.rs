@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
+use std::mem;
 
 pub struct Promise<T> {
     internal: Rc<RefCell<PromiseInternal<T>>>
@@ -81,6 +82,9 @@ impl<T: 'static> Promise<T> {
             internal_ref: self.internal.borrow()
         }
     }
+    pub fn is_resolved(&self) -> bool {
+        self.internal.borrow().value.is_some()
+    }
     pub fn then<T2: 'static, F: Fn(&T) -> T2 + 'static>(&self, transform: F) -> Promise<T2> {
         let p = Rc::new(RefCell::new(PromiseInternal::new()));
         let mut int = self.internal.borrow_mut();
@@ -105,23 +109,17 @@ impl<'a, T: 'a> Deref for PromiseValue<'a, T> {
     }
 }
 
-pub struct AsyncPromise<T> {
-    pub promise: Promise<T>,
-    receiver: Receiver<T>
+pub trait Resolveable {
+    fn try_resolve(&self) -> bool;
 }
-impl<T: Send + 'static> AsyncPromise<T> {
-    pub fn new<F: Fn() -> T + Send + Sized + 'static>(run: F) -> AsyncPromise<T> {
-        let (tx, rx) = mpsc::channel();
 
-        thread::spawn(move || {
-            tx.send(run()).unwrap();
-        });
-        AsyncPromise {
-            promise: Promise::new(),
-            receiver: rx
-        }
-    }
-    pub fn try_resolve(&self) -> bool {
+pub struct Running<T> {
+    receiver: Receiver<T>,
+    promise: Promise<T>
+}
+
+impl<T: 'static> Resolveable for Running<T> {
+    fn try_resolve(&self) -> bool {
         match self.receiver.try_recv() {
             Ok(value) => {
                 self.promise.resolve(value);
@@ -129,6 +127,34 @@ impl<T: Send + 'static> AsyncPromise<T> {
             },
             _ => false
         }
+    }
+}
+
+pub struct AsyncRunner {
+    running: Vec<Box<Resolveable>>
+}
+impl AsyncRunner {
+    pub fn new() -> AsyncRunner {
+        AsyncRunner {
+            running: vec![]
+        }
+    }
+    pub fn exec_async<T: Send + Sized + 'static, F: Fn() -> T + Send + Sized + 'static>(&mut self, run: F) -> Promise<T> {
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            match tx.send(run()) {
+                Ok(()) => {},
+                Err(err) => panic!("Thread error: {}", err)
+            }
+        });
+        let promise = Promise::new();
+        self.running.push(Box::new(Running { receiver: rx, promise: promise.clone() }));
+        promise
+    }
+    pub fn try_resolve_all(&mut self) {
+        let running = mem::replace(&mut self.running, Vec::new());
+        self.running = running.into_iter().filter(|r| !r.try_resolve()).collect();
     }
 }
 
@@ -149,15 +175,16 @@ fn test_promise_then() {
 
 #[test]
 fn test_promise_async() {
-    let p = AsyncPromise::new(|| {
+    let mut runner = AsyncRunner::new();
+    let p = runner.exec_async(|| {
         thread::sleep_ms(10);
         "Hello world from thread".to_string()
     });
-    p.try_resolve();
-    assert_eq!(p.promise.value().clone(), None);
+    runner.try_resolve_all();
+    assert_eq!(p.value().clone(), None);
     thread::sleep_ms(20);
-    p.try_resolve();
-    assert_eq!(p.promise.value().clone(), Some("Hello world from thread".to_string()));
+    runner.try_resolve_all();
+    assert_eq!(p.value().clone(), Some("Hello world from thread".to_string()));
 }
 
 #[test]
