@@ -117,13 +117,23 @@ impl<T: 'static> Promise<T> {
     }
 }
 
-pub fn join<T: Any + Sized + Clone>(promises: &[Promise<T>]) -> Promise<()> {
-    let mut p = promises.first().unwrap().clone();
+pub trait ToEmptyPromise {
+    fn to_empty(&self) -> Promise<()>;
+}
+
+impl<T: 'static> ToEmptyPromise for Promise<T> {
+    fn to_empty(&self) -> Promise<()> {
+        self.then(move |_| {})
+    }
+}
+
+pub fn join(promises: &[Box<ToEmptyPromise>]) -> Promise<()> {
+    let mut p = promises.first().unwrap().clone().to_empty();
     for p2 in promises.tail() {
-        let p2 = p2.clone();
+        let p2 = p2.clone().to_empty();
         p = p.then_promise(move |_| p2.clone());
     }
-    p.then(|_| { () })
+    p
 }
 
 pub struct PromiseValue<'a, T: 'a> {
@@ -226,11 +236,11 @@ fn test_promise_clone() {
 #[test]
 fn test_promise_join() {
     let a: Promise<i32> = Promise::new();
-    let b: Promise<i32> = Promise::new();
-    let j = join(&[a.clone(), b.clone()]).then(|&()| 10);
+    let b: Promise<String> = Promise::new();
+    let j = join(&[Box::new(a.clone()), Box::new(b.clone())]).then(|&()| 10);
     assert_eq!(*j.value(), None);
     a.resolve(5);
-    // assert_eq!(*j.value(), None);
-    // b.resolve(6);
-    // assert_eq!(*j.value(), Some(10));
+    assert_eq!(*j.value(), None);
+    b.resolve("hello".to_string());
+    assert_eq!(*j.value(), Some(10));
 }
