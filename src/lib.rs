@@ -1,4 +1,5 @@
-#![feature(core, unboxed_closures)]
+#![feature(core, unboxed_closures, core_slice_ext)]
+extern crate core;
 
 use std::rc::Rc;
 use std::cell::Ref;
@@ -9,6 +10,8 @@ use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
 use std::mem;
+use std::any::Any;
+use core::slice::SliceExt;
 
 pub struct Promise<T> {
     internal: Rc<RefCell<PromiseInternal<T>>>
@@ -27,17 +30,30 @@ struct PromiseInternal<T> {
 
 struct PromiseTransform<T, T2> {
     promise: Rc<RefCell<PromiseInternal<T2>>>,
-    transform: Box<Fn(&T) -> T2>
+    transform: Box<Fn(&T) -> Promise<T2>>
 }
 
 trait ApplyPromiseTransform<T> {
     fn apply(&self, value: &T);
 }
 
-impl<T: 'static, T2: 'static> ApplyPromiseTransform<T> for PromiseTransform<T, T2> {
+impl<T: 'static, T2: Clone + 'static> ApplyPromiseTransform<T> for PromiseTransform<T, T2> {
     fn apply(&self, value: &T) {
-        let next_val = self.transform.call((value, ));
-        self.promise.borrow_mut().resolve(next_val);
+        let next_promise = self.transform.call((value, ));
+        let had_value = {
+            let pi = next_promise.internal.borrow();
+            match &pi.value {
+                &Some(ref value) => {
+                    self.promise.borrow_mut().resolve(value.clone());
+                    true
+                },
+                &None => false
+            }
+        };
+        if !had_value {
+            let p = self.promise.clone();
+            next_promise.then(move |v| p.borrow_mut().resolve(v.clone()));
+        }
     }
 }
 
@@ -85,7 +101,10 @@ impl<T: 'static> Promise<T> {
     pub fn is_resolved(&self) -> bool {
         self.internal.borrow().value.is_some()
     }
-    pub fn then<T2: 'static, F: Fn(&T) -> T2 + 'static>(&self, transform: F) -> Promise<T2> {
+    pub fn then<T2: Clone + 'static, F: Fn(&T) -> T2 + 'static>(&self, transform: F) -> Promise<T2> {
+        self.then_promise(move |v| Promise::resolved(transform(v)))
+    }
+    pub fn then_promise<T2: Clone + 'static, F: Fn(&T) -> Promise<T2> + 'static>(&self, transform: F) -> Promise<T2> {
         let p = Rc::new(RefCell::new(PromiseInternal::new()));
         let mut int = self.internal.borrow_mut();
         int.then.push(Box::new(PromiseTransform {
@@ -96,6 +115,15 @@ impl<T: 'static> Promise<T> {
             internal: p.clone()
         }
     }
+}
+
+pub fn join<T: Any + Sized + Clone>(promises: &[Promise<T>]) -> Promise<()> {
+    let mut p = promises.first().unwrap().clone();
+    for p2 in promises.tail() {
+        let p2 = p2.clone();
+        p = p.then_promise(move |_| p2.clone());
+    }
+    p.then(|_| { () })
 }
 
 pub struct PromiseValue<'a, T: 'a> {
@@ -193,4 +221,16 @@ fn test_promise_clone() {
     let p2 = p.clone();
     p.resolve(5);
     assert_eq!(p2.value().clone(), Some(5));
+}
+
+#[test]
+fn test_promise_join() {
+    let a: Promise<i32> = Promise::new();
+    let b: Promise<i32> = Promise::new();
+    let j = join(&[a.clone(), b.clone()]).then(|&()| 10);
+    assert_eq!(*j.value(), None);
+    a.resolve(5);
+    // assert_eq!(*j.value(), None);
+    // b.resolve(6);
+    // assert_eq!(*j.value(), Some(10));
 }
