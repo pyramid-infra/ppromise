@@ -1,10 +1,12 @@
-#![feature(box_patterns, cell_extras, unboxed_closures, fnbox)]
+#![feature(core, core_slice_ext, box_patterns, cell_extras, unboxed_closures, fnbox)]
+extern crate core;
 
 use std::mem;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::cell::Ref;
 use std::boxed::FnBox;
+use core::slice::SliceExt;
 
 pub struct Promise<T> {
     state: Rc<RefCell<PromiseState<T>>>
@@ -161,6 +163,23 @@ pub fn join3<T1: 'static, T2: 'static, T3: 'static>(p1: &mut Promise<T1>, p2: &m
     })
 }
 
+pub trait Joinable<T> {
+    fn join(self) -> Promise<T>;
+}
+
+impl<'a, T: 'static> Joinable<Vec<T>> for Vec<&'a mut Promise<T>> {
+    fn join(mut self) -> Promise<Vec<T>> {
+        let mut p: Promise<Vec<T>> = self[0].then_move(|x| vec![x]);
+        for i in 1..self.len() {
+            let mut p2 = &mut self[i];
+            p = p2.then_move_promise(move |x| {
+                p.then_move(move |mut xs: Vec<T>| { xs.push(x); xs })
+            });
+        }
+        p
+    }
+}
+
 #[test]
 fn test_promise_resolve() {
     let mut p = Promise::new();
@@ -231,4 +250,16 @@ fn test_promise_join3() {
     b.resolve("hello".to_string());
     c.resolve("world".to_string());
     assert_eq!(*j.value().unwrap(), "5 _ hello world".to_string());
+}
+
+#[test]
+fn test_promise_array_join() {
+    let mut a: Promise<i32> = Promise::new();
+    let mut b: Promise<i32> = Promise::new();
+    let j: Promise<Vec<i32>> = vec![&mut a, &mut b].join();
+    assert!(j.value().is_none());
+    a.resolve(5);
+    assert!(j.value().is_none());
+    b.resolve(7);
+    assert_eq!(*j.value().unwrap(), vec![5, 7]);
 }
