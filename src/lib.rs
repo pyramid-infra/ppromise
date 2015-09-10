@@ -7,6 +7,9 @@ use std::cell::RefCell;
 use std::cell::Ref;
 use std::boxed::FnBox;
 use core::slice::SliceExt;
+use std::thread;
+use std::sync::mpsc;
+use std::sync::mpsc::*;
 
 pub struct Promise<T> {
     state: Rc<RefCell<PromiseState<T>>>
@@ -192,6 +195,57 @@ impl<'a, T1: 'static, T2: 'static, T3: 'static> Joinable<(T1, T2, T3)> for (&'a 
     }
 }
 
+
+trait Resolveable {
+    fn try_resolve(&self) -> bool;
+}
+
+struct Running<T> {
+    receiver: Receiver<T>,
+    promise_state: Rc<RefCell<PromiseState<T>>>
+}
+
+impl<T: 'static> Resolveable for Running<T> {
+    fn try_resolve(&self) -> bool {
+        match self.receiver.try_recv() {
+            Ok(value) => {
+                self.promise_state.resolve(value);
+                true
+            },
+            _ => false
+        }
+    }
+}
+
+pub struct AsyncRunner {
+    running: Vec<Box<Resolveable>>
+}
+impl AsyncRunner {
+    pub fn new() -> AsyncRunner {
+        AsyncRunner {
+            running: vec![]
+        }
+    }
+    pub fn exec_async<T: Send + Sized + 'static, F: Fn() -> T + Send + Sized + 'static>(&mut self, run: F) -> Promise<T> {
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            match tx.send(run()) {
+                Ok(()) => {},
+                Err(err) => panic!("Thread error: {}", err)
+            }
+        });
+        let promise = Promise::new();
+        self.running.push(Box::new(Running { receiver: rx, promise_state: promise.state.clone() }));
+        promise
+    }
+    pub fn try_resolve_all(&mut self) {
+        let running = mem::replace(&mut self.running, Vec::new());
+        self.running = running.into_iter().filter(|r| !r.try_resolve()).collect();
+    }
+}
+
+
 #[test]
 fn test_promise_resolve() {
     let mut p = Promise::new();
@@ -274,4 +328,18 @@ fn test_promise_array_join() {
     assert!(j.value().is_none());
     b.resolve(7);
     assert_eq!(*j.value().unwrap(), vec![5, 7]);
+}
+
+#[test]
+fn test_promise_async() {
+    let mut runner = AsyncRunner::new();
+    let p = runner.exec_async(|| {
+        thread::sleep_ms(10);
+        "Hello world from thread".to_string()
+    });
+    runner.try_resolve_all();
+    assert!(p.value().is_none());
+    thread::sleep_ms(20);
+    runner.try_resolve_all();
+    assert_eq!(*p.value().unwrap(), "Hello world from thread");
 }
