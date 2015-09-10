@@ -291,6 +291,14 @@ fn test_promise_then() {
     assert_eq!(*p2.value().unwrap(), 10);
 }
 
+#[test]
+fn test_then_after_resolved() {
+    let mut p = Promise::new();
+    p.resolve(7);
+    let p2 = p.then(|x| x * 2);
+    assert_eq!(*p2.value().unwrap(), 14);
+}
+
 
 #[test]
 fn test_promise_join() {
