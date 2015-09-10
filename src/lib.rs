@@ -149,6 +149,17 @@ pub fn join<T1: 'static, T2: 'static>(p1: &mut Promise<T1>, p2: &mut Promise<T2>
         })
     })
 }
+pub fn join3<T1: 'static, T2: 'static, T3: 'static>(p1: &mut Promise<T1>, p2: &mut Promise<T2>, p3: &mut Promise<T3>) -> Promise<(T1, T2, T3)> {
+    let mut p2 = Promise { state: p2.state.clone() };
+    let mut p3 = Promise { state: p3.state.clone() };
+    p1.then_move_promise(move |x1| {
+        p2.then_move_promise(move |x2| {
+            p3.then_move(move |x3| {
+                (x1, x2, x3)
+            })
+        })
+    })
+}
 
 #[test]
 fn test_promise_resolve() {
@@ -206,4 +217,18 @@ fn test_promise_join() {
     assert!(j.value().is_none());
     b.resolve("hello".to_string());
     assert_eq!(*j.value().unwrap(), "5 _ hello".to_string());
+}
+
+#[test]
+fn test_promise_join3() {
+    let mut a: Promise<i32> = Promise::new();
+    let mut b: Promise<String> = Promise::new();
+    let mut c: Promise<String> = Promise::new();
+    let j = join3(&mut a, &mut b, &mut c).then(|&(ref i, ref s, ref s2)| format!("{} _ {} {}", i, s, s2));
+    assert!(j.value().is_none());
+    a.resolve(5);
+    assert!(j.value().is_none());
+    b.resolve("hello".to_string());
+    c.resolve("world".to_string());
+    assert_eq!(*j.value().unwrap(), "5 _ hello world".to_string());
 }
