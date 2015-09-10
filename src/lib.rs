@@ -145,6 +145,28 @@ pub fn join<'a, T1: 'static + Clone, T2: 'static + Clone>(p1: &'a Promise<T1>, p
     })
 }
 
+pub fn join3<'a, T1: 'static + Clone, T2: 'static + Clone, T3: 'static + Clone>(p1: &'a Promise<T1>, p2: &'a Promise<T2>, p3: &'a Promise<T3>) -> Promise<(T1, T2, T3)> {
+    let p2 = Promise {
+        internal: p2.internal.clone()
+    };
+    let p3 = Promise {
+        internal: p3.internal.clone()
+    };
+    p1.then_promise(move |x1| {
+        let x1 = x1.clone();
+        let p3 = Promise {
+            internal: p3.internal.clone()
+        };
+        p2.then_promise(move |x2| {
+            let x1 = x1.clone();
+            let x2 = x2.clone();
+            p3.then(move |x3| {
+                (x1.clone(), x2.clone(), x3.clone())
+            })
+        })
+    })
+}
+
 pub struct PromiseValue<'a, T: 'a> {
     internal_ref: Ref<'a, PromiseInternal<T>>
 }
@@ -245,6 +267,20 @@ fn test_promise_join() {
     assert_eq!(*j.value(), None);
     b.resolve("hello".to_string());
     assert_eq!(*j.value(), Some("5 _ hello".to_string()));
+}
+
+#[test]
+fn test_promise_join3() {
+    let a: Promise<i32> = Promise::new();
+    let b: Promise<String> = Promise::new();
+    let c: Promise<String> = Promise::new();
+    let j = join3(&a, &b, &c).then(|&(ref i, ref s, ref s2)| format!("{} _ {} {}", i, s, s2));
+    assert_eq!(*j.value(), None);
+    a.resolve(5);
+    assert_eq!(*j.value(), None);
+    b.resolve("hello".to_string());
+    c.resolve("world".to_string());
+    assert_eq!(*j.value(), Some("5 _ hello world".to_string()));
 }
 
 #[test]
