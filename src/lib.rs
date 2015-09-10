@@ -10,17 +10,10 @@ use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
 use std::mem;
-use std::any::Any;
 use core::slice::SliceExt;
 
 pub struct Promise<T> {
     internal: Rc<RefCell<PromiseInternal<T>>>
-}
-
-impl<T> Clone for Promise<T> {
-    fn clone(&self) -> Promise<T> {
-        Promise { internal: self.internal.clone() }
-    }
 }
 
 struct PromiseInternal<T> {
@@ -101,10 +94,16 @@ impl<T: 'static> Promise<T> {
     pub fn is_resolved(&self) -> bool {
         self.internal.borrow().value.is_some()
     }
-    pub fn then<T2: Clone + 'static, F: Fn(&T) -> T2 + 'static>(&self, transform: F) -> Promise<T2> {
+    fn then<T2: Clone + 'static, F: Fn(&T) -> T2 + 'static>(&self, transform: F) -> Promise<T2> {
         self.then_promise(move |v| Promise::resolved(transform(v)))
     }
-    pub fn then_promise<T2: Clone + 'static, F: Fn(&T) -> Promise<T2> + 'static>(&self, transform: F) -> Promise<T2> {
+    fn then_promise<T2: Clone + 'static, F: Fn(&T) -> Promise<T2> + 'static>(&self, transform: F) -> Promise<T2> {
+        match &self.internal.borrow().value {
+            &Some(ref value) => {
+                return transform(value);
+            },
+            &None => {}
+        }
         let p = Rc::new(RefCell::new(PromiseInternal::new()));
         let mut int = self.internal.borrow_mut();
         int.then.push(Box::new(PromiseTransform {
@@ -117,23 +116,33 @@ impl<T: 'static> Promise<T> {
     }
 }
 
-pub trait ToEmptyPromise {
-    fn to_empty(&self) -> Promise<()>;
+pub trait Joinable<T> {
+    fn join(self) -> Promise<T>;
 }
 
-impl<T: 'static> ToEmptyPromise for Promise<T> {
-    fn to_empty(&self) -> Promise<()> {
-        self.then(move |_| {})
+impl<'a, T: 'static + Clone> Joinable<Vec<T>> for Vec<&'a Promise<T>> {
+    fn join(self) -> Promise<Vec<T>> {
+        let mut p: Promise<Vec<T>> = self[0].then(|x| vec![x.clone()]);
+        for p2 in self.tail() {
+            p = p2.then_promise(move |x| {
+                let x = x.clone();
+                p.then(move |xs: &Vec<T>| { let mut xs = xs.clone(); xs.push(x.clone()); xs })
+            });
+        }
+        p
     }
 }
 
-pub fn join(promises: &[Box<ToEmptyPromise>]) -> Promise<()> {
-    let mut p = promises.first().unwrap().clone().to_empty();
-    for p2 in promises.tail() {
-        let p2 = p2.clone().to_empty();
-        p = p.then_promise(move |_| p2.clone());
-    }
-    p
+pub fn join<'a, T1: 'static + Clone, T2: 'static + Clone>(p1: &'a Promise<T1>, p2: &'a Promise<T2>) -> Promise<(T1, T2)> {
+    let p2 = Promise {
+        internal: p2.internal.clone()
+    };
+    p1.then_promise(move |x1| {
+        let x1 = x1.clone();
+        p2.then(move |x2| {
+            (x1.clone(), x2.clone())
+        })
+    })
 }
 
 pub struct PromiseValue<'a, T: 'a> {
@@ -153,14 +162,14 @@ pub trait Resolveable {
 
 pub struct Running<T> {
     receiver: Receiver<T>,
-    promise: Promise<T>
+    promise: Rc<RefCell<PromiseInternal<T>>>
 }
 
 impl<T: 'static> Resolveable for Running<T> {
     fn try_resolve(&self) -> bool {
         match self.receiver.try_recv() {
             Ok(value) => {
-                self.promise.resolve(value);
+                self.promise.borrow_mut().resolve(value);
                 true
             },
             _ => false
@@ -187,7 +196,7 @@ impl AsyncRunner {
             }
         });
         let promise = Promise::new();
-        self.running.push(Box::new(Running { receiver: rx, promise: promise.clone() }));
+        self.running.push(Box::new(Running { receiver: rx, promise: promise.internal.clone() }));
         promise
     }
     pub fn try_resolve_all(&mut self) {
@@ -225,22 +234,34 @@ fn test_promise_async() {
     assert_eq!(p.value().clone(), Some("Hello world from thread".to_string()));
 }
 
-#[test]
-fn test_promise_clone() {
-    let p = Promise::new();
-    let p2 = p.clone();
-    p.resolve(5);
-    assert_eq!(p2.value().clone(), Some(5));
-}
 
 #[test]
 fn test_promise_join() {
     let a: Promise<i32> = Promise::new();
     let b: Promise<String> = Promise::new();
-    let j = join(&[Box::new(a.clone()), Box::new(b.clone())]).then(|&()| 10);
+    let j = join(&a, &b).then(|&(ref i, ref s)| format!("{} _ {}", i, s));
     assert_eq!(*j.value(), None);
     a.resolve(5);
     assert_eq!(*j.value(), None);
     b.resolve("hello".to_string());
-    assert_eq!(*j.value(), Some(10));
+    assert_eq!(*j.value(), Some("5 _ hello".to_string()));
+}
+
+#[test]
+fn test_promise_array_join() {
+    let a: Promise<i32> = Promise::new();
+    let b: Promise<i32> = Promise::new();
+    let j: Promise<Vec<i32>> = vec![&a, &b].join();
+    assert_eq!(*j.value(), None);
+    a.resolve(5);
+    assert_eq!(*j.value(), None);
+    b.resolve(7);
+    assert_eq!(*j.value(), Some(vec![5, 7]));
+}
+#[test]
+fn test_then_after_done() {
+    let p = Promise::new();
+    p.resolve(7);
+    let p2 = p.then(|x| x * 2);
+    assert_eq!(p2.value().clone(), Some(14));
 }
