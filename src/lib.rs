@@ -77,6 +77,14 @@ impl<T: 'static> Promise<T> {
             _ => None
         })
     }
+    pub fn into_value(self) -> T {
+        let mut s = self.state.borrow_mut();
+        let state = mem::replace(&mut *s, PromiseState::None);
+        match state {
+            PromiseState::Value(value) => value,
+            _ => panic!("Trying to call into_value on non-value promise.")
+        }
+    }
     pub fn then_move<T2: 'static, F: FnOnce(T) -> T2 + 'static>(&mut self, transform: F) -> Promise<T2> {
         let p = Promise::<T2>::new();
         let p_state = p.state.clone();
@@ -155,6 +163,12 @@ pub fn join3<T1: 'static, T2: 'static, T3: 'static>(p1: &mut Promise<T1>, p2: &m
 
 pub trait Joinable<T> {
     fn join(self) -> Promise<T>;
+}
+
+impl<'a, T: 'static> Joinable<Vec<T>> for Vec<Promise<T>> {
+    fn join(mut self) -> Promise<Vec<T>> {
+        self.iter_mut().collect::<Vec<&mut Promise<T>>>().join()
+    }
 }
 
 impl<'a, T: 'static> Joinable<Vec<T>> for Vec<&'a mut Promise<T>> {
