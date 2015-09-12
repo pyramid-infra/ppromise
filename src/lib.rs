@@ -15,48 +15,6 @@ pub struct Promise<T> {
     state: Rc<RefCell<PromiseState<T>>>
 }
 
-enum PromiseState<T> {
-    None,
-    Value(T),
-    Then(Box<FnBox(&T) -> ()>, Box<PromiseState<T>>),
-    ThenMove(Box<FnBox(T) -> ()>)
-}
-
-impl<T> PromiseState<T> {
-    fn is_value(&self) -> bool {
-        if let &PromiseState::Value(_) = self {
-            true
-        } else {
-            false
-        }
-    }
-    fn transform(self, value: T) -> PromiseState<T> {
-        match self {
-            PromiseState::None => PromiseState::Value(value),
-            PromiseState::Then(transform, box then) => {
-                transform.call_box((&value,));
-                then.transform(value)
-            },
-            PromiseState::ThenMove(transform) => {
-                transform(value);
-                PromiseState::None
-            },
-            _ => unreachable!()
-        }
-    }
-}
-
-trait ResolvableState<T> {
-    fn resolve(&self, value: T);
-}
-impl<T> ResolvableState<T> for Rc<RefCell<PromiseState<T>>> {
-    fn resolve(&self, value: T) {
-        let mut s = self.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::None);
-        *s = state.transform(value);
-    }
-}
-
 impl<T: 'static> Promise<T> {
     pub fn new() -> Promise<T> {
         Promise {
@@ -89,8 +47,7 @@ impl<T: 'static> Promise<T> {
         let p = Promise::<T2>::new();
         let p_state = p.state.clone();
         self._then_move(move |value| {
-            let v2 = transform(value);
-            p_state.resolve(v2);
+            p_state.resolve(transform(value));
         });
         p
     }
@@ -98,8 +55,7 @@ impl<T: 'static> Promise<T> {
         let p = Promise::<T2>::new();
         let p_state = p.state.clone();
         self._then(move |value| {
-            let v2 = transform(value);
-            p_state.resolve(v2);
+            p_state.resolve(transform(value));
         });
         p
     }
@@ -108,7 +64,6 @@ impl<T: 'static> Promise<T> {
         let p_state = p.state.clone();
         self._then_move(move |value| {
             let mut p2 = transform(value);
-            let p_state = p_state.clone();
             p2._then_move(move |v2| {
                 p_state.resolve(v2);
             });
@@ -120,7 +75,6 @@ impl<T: 'static> Promise<T> {
         let p_state = p.state.clone();
         self._then(move |value| {
             let mut p2 = transform(value);
-            let p_state = p_state.clone();
             p2._then_move(move |v2| {
                 p_state.resolve(v2);
             });
@@ -144,11 +98,9 @@ impl<T: 'static> Promise<T> {
         if let &PromiseState::Value(ref value) = &*self.state.borrow() {
             return transform(value);
         }
-        let old_state = {
-            let mut s = self.state.borrow_mut();
-            mem::replace(&mut *s, PromiseState::None)
-        };
-        *self.state.borrow_mut() = PromiseState::Then(Box::new(move |value: &T| {
+        let mut s = self.state.borrow_mut();
+        let old_state = mem::replace(&mut *s, PromiseState::None);
+        *s = PromiseState::Then(Box::new(move |value: &T| {
             transform(value);
         }), Box::new(old_state));
     }
@@ -259,6 +211,48 @@ impl AsyncRunner {
     }
 }
 
+
+enum PromiseState<T> {
+    None,
+    Value(T),
+    Then(Box<FnBox(&T) -> ()>, Box<PromiseState<T>>),
+    ThenMove(Box<FnBox(T) -> ()>)
+}
+
+impl<T> PromiseState<T> {
+    fn is_value(&self) -> bool {
+        if let &PromiseState::Value(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+    fn transform(self, value: T) -> PromiseState<T> {
+        match self {
+            PromiseState::None => PromiseState::Value(value),
+            PromiseState::Then(transform, box then) => {
+                transform.call_box((&value,));
+                then.transform(value)
+            },
+            PromiseState::ThenMove(transform) => {
+                transform(value);
+                PromiseState::None
+            },
+            _ => unreachable!()
+        }
+    }
+}
+
+trait ResolvableState<T> {
+    fn resolve(&self, value: T);
+}
+impl<T> ResolvableState<T> for Rc<RefCell<PromiseState<T>>> {
+    fn resolve(&self, value: T) {
+        let mut s = self.borrow_mut();
+        let state = mem::replace(&mut *s, PromiseState::None);
+        *s = state.transform(value);
+    }
+}
 
 #[test]
 fn test_promise_resolve() {
