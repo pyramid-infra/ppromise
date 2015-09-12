@@ -37,7 +37,7 @@ impl<T: 'static> Promise<T> {
     }
     pub fn into_value(self) -> T {
         let mut s = self.state.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::Unresolved);
+        let state = mem::replace(&mut *s, PromiseState::Moved);
         match state {
             PromiseState::Resolved(value) => value,
             _ => panic!("Trying to call into_value on non-value promise.")
@@ -83,7 +83,7 @@ impl<T: 'static> Promise<T> {
     }
     fn _then_move<F: FnOnce(T) -> () + 'static>(&mut self, transform: F) {
         if self.state.borrow().is_moved() {
-            panic!("Trying to move promise that has already been moved.");
+            panic!("Trying to move promise value that has already been moved.");
         }
         if self.state.borrow().is_resolved() {
             let mut s = self.state.borrow_mut();
@@ -101,7 +101,7 @@ impl<T: 'static> Promise<T> {
     }
     fn _then<F: FnOnce(&T) -> () + 'static>(&mut self, transform: F) {
         if self.state.borrow().is_moved() {
-            panic!("Trying to borrow promise that has already been moved.");
+            panic!("Trying to borrow promise value that has already been moved.");
         }
         if let &PromiseState::Resolved(ref value) = &*self.state.borrow() {
             return transform(value);
@@ -262,7 +262,7 @@ impl<T> PromiseState<T> {
                 PromiseState::Then(t, Box::new(then.insert_then_move(transform)))
             },
             PromiseState::ThenMove(_) => {
-                panic!("Cannot move out of promise twice.");
+                panic!("Cannot move value out of promise twice.");
             },
             _ => unreachable!()
         }
