@@ -90,19 +90,21 @@ impl<T: 'static> Promise<T> {
                 unreachable!();
             }
         }
-        *self.state.borrow_mut() = PromiseState::ThenMove(Box::new(move |value| {
+        let mut s = self.state.borrow_mut();
+        let state = mem::replace(&mut *s, PromiseState::None);
+        *s = state.insert_then_move(move |value: T| {
             transform(value);
-        }));
+        });
     }
     fn _then<F: FnOnce(&T) -> () + 'static>(&mut self, transform: F) {
         if let &PromiseState::Value(ref value) = &*self.state.borrow() {
             return transform(value);
         }
         let mut s = self.state.borrow_mut();
-        let old_state = mem::replace(&mut *s, PromiseState::None);
-        *s = PromiseState::Then(Box::new(move |value: &T| {
+        let state = mem::replace(&mut *s, PromiseState::None);
+        *s = state.insert_then(move |value: &T| {
             transform(value);
-        }), Box::new(old_state));
+        });
     }
 }
 
@@ -227,6 +229,30 @@ impl<T> PromiseState<T> {
             false
         }
     }
+    fn insert_then<F: FnOnce(&T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
+        match self {
+            PromiseState::None => PromiseState::Then(Box::new(transform), Box::new(PromiseState::None)),
+            PromiseState::Then(t, box then) => {
+                PromiseState::Then(t, Box::new(then.insert_then(transform)))
+            },
+            PromiseState::ThenMove(t) => {
+                PromiseState::Then(Box::new(transform), Box::new(PromiseState::ThenMove(t)))
+            },
+            _ => unreachable!()
+        }
+    }
+    fn insert_then_move<F: FnOnce(T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
+        match self {
+            PromiseState::None => PromiseState::ThenMove(Box::new(transform)),
+            PromiseState::Then(t, box then) => {
+                PromiseState::Then(t, Box::new(then.insert_then_move(transform)))
+            },
+            PromiseState::ThenMove(_) => {
+                panic!("Cannot move out of promise twice.");
+            },
+            _ => unreachable!()
+        }
+    }
     fn transform(self, value: T) -> PromiseState<T> {
         match self {
             PromiseState::None => PromiseState::Value(value),
@@ -307,6 +333,24 @@ fn test_then_after_resolved() {
     assert_eq!(*p2.value().unwrap(), 14);
 }
 
+#[test]
+fn test_promise_then_then_move() {
+    let mut p = Promise::new();
+    let p2 = p.then(|val| val * 2);
+    let p3 = p.then_move(|val| val * 3);
+    p.resolve(5);
+    assert!(p.value().is_none());
+    assert_eq!(*p2.value().unwrap(), 10);
+    assert_eq!(*p3.value().unwrap(), 15);
+}
+
+#[test]
+#[should_panic]
+fn test_promise_then_move_then_move() {
+    let mut p = Promise::<i32>::new();
+    p.then_move(|val| val * 2);
+    p.then_move(|val| val * 3);
+}
 
 #[test]
 fn test_promise_join() {
