@@ -18,12 +18,12 @@ pub struct Promise<T> {
 impl<T: 'static> Promise<T> {
     pub fn new() -> Promise<T> {
         Promise {
-            state: Rc::new(RefCell::new(PromiseState::None))
+            state: Rc::new(RefCell::new(PromiseState::Unresolved))
         }
     }
     pub fn resolved(value: T) -> Promise<T> {
         Promise {
-            state: Rc::new(RefCell::new(PromiseState::Value(value)))
+            state: Rc::new(RefCell::new(PromiseState::Resolved(value)))
         }
     }
     pub fn resolve(&mut self, value: T) {
@@ -31,15 +31,15 @@ impl<T: 'static> Promise<T> {
     }
     pub fn value(&self) -> Option<Ref<T>> {
         Ref::filter_map(self.state.borrow(), |state| match state {
-            &PromiseState::Value(ref value) => Some(value),
+            &PromiseState::Resolved(ref value) => Some(value),
             _ => None
         })
     }
     pub fn into_value(self) -> T {
         let mut s = self.state.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::None);
+        let state = mem::replace(&mut *s, PromiseState::Unresolved);
         match state {
-            PromiseState::Value(value) => value,
+            PromiseState::Resolved(value) => value,
             _ => panic!("Trying to call into_value on non-value promise.")
         }
     }
@@ -82,26 +82,32 @@ impl<T: 'static> Promise<T> {
         p
     }
     fn _then_move<F: FnOnce(T) -> () + 'static>(&mut self, transform: F) {
-        if self.state.borrow().is_value() {
+        if self.state.borrow().is_moved() {
+            panic!("Trying to move promise that has already been moved.");
+        }
+        if self.state.borrow().is_resolved() {
             let mut s = self.state.borrow_mut();
-            if let PromiseState::Value(value) = mem::replace(&mut *s, PromiseState::None) {
+            if let PromiseState::Resolved(value) = mem::replace(&mut *s, PromiseState::Moved) {
                 return transform(value);
             } else {
                 unreachable!();
             }
         }
         let mut s = self.state.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::None);
+        let state = mem::replace(&mut *s, PromiseState::Unresolved);
         *s = state.insert_then_move(move |value: T| {
             transform(value);
         });
     }
     fn _then<F: FnOnce(&T) -> () + 'static>(&mut self, transform: F) {
-        if let &PromiseState::Value(ref value) = &*self.state.borrow() {
+        if self.state.borrow().is_moved() {
+            panic!("Trying to borrow promise that has already been moved.");
+        }
+        if let &PromiseState::Resolved(ref value) = &*self.state.borrow() {
             return transform(value);
         }
         let mut s = self.state.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::None);
+        let state = mem::replace(&mut *s, PromiseState::Unresolved);
         *s = state.insert_then(move |value: &T| {
             transform(value);
         });
@@ -215,15 +221,23 @@ impl AsyncRunner {
 
 
 enum PromiseState<T> {
-    None,
-    Value(T),
+    Unresolved,
+    Moved,
+    Resolved(T),
     Then(Box<FnBox(&T) -> ()>, Box<PromiseState<T>>),
     ThenMove(Box<FnBox(T) -> ()>)
 }
 
 impl<T> PromiseState<T> {
-    fn is_value(&self) -> bool {
-        if let &PromiseState::Value(_) = self {
+    fn is_resolved(&self) -> bool {
+        if let &PromiseState::Resolved(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+    fn is_moved(&self) -> bool {
+        if let &PromiseState::Moved = self {
             true
         } else {
             false
@@ -231,7 +245,7 @@ impl<T> PromiseState<T> {
     }
     fn insert_then<F: FnOnce(&T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
         match self {
-            PromiseState::None => PromiseState::Then(Box::new(transform), Box::new(PromiseState::None)),
+            PromiseState::Unresolved => PromiseState::Then(Box::new(transform), Box::new(PromiseState::Unresolved)),
             PromiseState::Then(t, box then) => {
                 PromiseState::Then(t, Box::new(then.insert_then(transform)))
             },
@@ -243,7 +257,7 @@ impl<T> PromiseState<T> {
     }
     fn insert_then_move<F: FnOnce(T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
         match self {
-            PromiseState::None => PromiseState::ThenMove(Box::new(transform)),
+            PromiseState::Unresolved => PromiseState::ThenMove(Box::new(transform)),
             PromiseState::Then(t, box then) => {
                 PromiseState::Then(t, Box::new(then.insert_then_move(transform)))
             },
@@ -255,14 +269,14 @@ impl<T> PromiseState<T> {
     }
     fn transform(self, value: T) -> PromiseState<T> {
         match self {
-            PromiseState::None => PromiseState::Value(value),
+            PromiseState::Unresolved => PromiseState::Resolved(value),
             PromiseState::Then(transform, box then) => {
                 transform.call_box((&value,));
                 then.transform(value)
             },
             PromiseState::ThenMove(transform) => {
                 transform(value);
-                PromiseState::None
+                PromiseState::Unresolved
             },
             _ => unreachable!()
         }
@@ -275,7 +289,7 @@ trait ResolvableState<T> {
 impl<T> ResolvableState<T> for Rc<RefCell<PromiseState<T>>> {
     fn resolve(&self, value: T) {
         let mut s = self.borrow_mut();
-        let state = mem::replace(&mut *s, PromiseState::None);
+        let state = mem::replace(&mut *s, PromiseState::Unresolved);
         *s = state.transform(value);
     }
 }
@@ -350,6 +364,22 @@ fn test_promise_then_move_then_move() {
     let mut p = Promise::<i32>::new();
     p.then_move(|val| val * 2);
     p.then_move(|val| val * 3);
+}
+
+#[test]
+#[should_panic]
+fn test_promise_resolved_then_move_then_move() {
+    let mut p = Promise::resolved(5);
+    p.then_move(|val| val * 2);
+    p.then_move(|val| val * 3);
+}
+
+#[test]
+#[should_panic]
+fn test_promise_resolved_then_move_then() {
+    let mut p = Promise::resolved(5);
+    p.then_move(|val| val * 2);
+    p.then(|val| val * 3);
 }
 
 #[test]
