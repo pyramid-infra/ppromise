@@ -224,7 +224,7 @@ enum PromiseState<T> {
     Unresolved,
     Moved,
     Resolved(T),
-    Then(Box<FnBox(&T) -> ()>, Box<PromiseState<T>>),
+    Then(Vec<Box<FnBox(&T) -> ()>>, Box<PromiseState<T>>),
     ThenMove(Box<FnBox(T) -> ()>)
 }
 
@@ -245,12 +245,13 @@ impl<T> PromiseState<T> {
     }
     fn insert_then<F: FnOnce(&T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
         match self {
-            PromiseState::Unresolved => PromiseState::Then(Box::new(transform), Box::new(PromiseState::Unresolved)),
-            PromiseState::Then(t, box then) => {
-                PromiseState::Then(t, Box::new(then.insert_then(transform)))
+            PromiseState::Unresolved => PromiseState::Then(vec![Box::new(transform)], Box::new(PromiseState::Unresolved)),
+            PromiseState::Then(mut ts, then) => {
+                ts.push(Box::new(transform));
+                PromiseState::Then(ts, then)
             },
             PromiseState::ThenMove(t) => {
-                PromiseState::Then(Box::new(transform), Box::new(PromiseState::ThenMove(t)))
+                PromiseState::Then(vec![Box::new(transform)], Box::new(PromiseState::ThenMove(t)))
             },
             _ => unreachable!()
         }
@@ -258,8 +259,8 @@ impl<T> PromiseState<T> {
     fn insert_then_move<F: FnOnce(T) -> () + 'static>(self, transform: F) -> PromiseState<T> {
         match self {
             PromiseState::Unresolved => PromiseState::ThenMove(Box::new(transform)),
-            PromiseState::Then(t, box then) => {
-                PromiseState::Then(t, Box::new(then.insert_then_move(transform)))
+            PromiseState::Then(ts, box then) => {
+                PromiseState::Then(ts, Box::new(then.insert_then_move(transform)))
             },
             PromiseState::ThenMove(_) => {
                 panic!("Cannot move value out of promise twice.");
@@ -270,8 +271,10 @@ impl<T> PromiseState<T> {
     fn transform(self, value: T) -> PromiseState<T> {
         match self {
             PromiseState::Unresolved => PromiseState::Resolved(value),
-            PromiseState::Then(transform, box then) => {
-                transform.call_box((&value,));
+            PromiseState::Then(transforms, box then) => {
+                for transform in transforms {
+                    transform.call_box((&value,));
+                }
                 then.transform(value)
             },
             PromiseState::ThenMove(transform) => {
