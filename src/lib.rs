@@ -1,5 +1,6 @@
 #![feature(core, core_slice_ext, box_patterns, cell_extras, unboxed_closures, fnbox)]
 extern crate core;
+extern crate threadpool;
 
 use std::mem;
 use std::rc::Rc;
@@ -10,6 +11,7 @@ use core::slice::SliceExt;
 use std::thread;
 use std::sync::mpsc;
 use std::sync::mpsc::*;
+use threadpool::ThreadPool;
 
 pub struct Promise<T> {
     state: Rc<RefCell<PromiseState<T>>>
@@ -192,23 +194,38 @@ impl<T: 'static> Resolveable for Running<T> {
 }
 
 pub struct AsyncRunner {
-    running: Vec<Box<Resolveable>>
+    running: Vec<Box<Resolveable>>,
+    pool: Option<ThreadPool>
 }
 impl AsyncRunner {
     pub fn new() -> AsyncRunner {
         AsyncRunner {
-            running: vec![]
+            running: vec![],
+            pool: None
+        }
+    }
+    pub fn new_pooled(threads: usize) -> AsyncRunner {
+        AsyncRunner {
+            running: vec![],
+            pool: Some(ThreadPool::new(threads))
         }
     }
     pub fn exec_async<T: Send + Sized + 'static, F: Fn() -> T + Send + Sized + 'static>(&mut self, run: F) -> Promise<T> {
         let (tx, rx) = mpsc::channel();
 
-        thread::spawn(move || {
+        let f = move || {
             match tx.send(run()) {
                 Ok(()) => {},
                 Err(err) => panic!("Thread error: {}", err)
             }
-        });
+        };
+
+        if let &Some(ref pool) = &self.pool {
+            pool.execute(f);
+        } else {
+            thread::spawn(f);
+        }
+
         let promise = Promise::new();
         self.running.push(Box::new(Running { receiver: rx, promise_state: promise.state.clone() }));
         promise
